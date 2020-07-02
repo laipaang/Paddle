@@ -376,6 +376,7 @@ class BoxWrapper {
     virtual void add_data(const Scope* exe_scope,
                           const paddle::platform::Place& place) {
       int label_len = 0;
+
       const int64_t* label_data = NULL;
       int pred_len = 0;
       const float* pred_data = NULL;
