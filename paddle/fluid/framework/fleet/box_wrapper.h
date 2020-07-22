@@ -132,8 +132,8 @@ public:
     int r;
     h_emb_mtx.lock();
     h_emb.insert(h_emb.end(), emb.begin(), emb.end());
-    ++h_emb_count;
     r = h_emb_count;
+    ++h_emb_count;
     h_emb_mtx.unlock();
     return r;
   }

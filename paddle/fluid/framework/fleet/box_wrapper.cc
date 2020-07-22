@@ -328,6 +328,7 @@ void BoxWrapper::PullSparse(const paddle::platform::Place& place,
                 PULLSPARSE_CASE(64););
     EMBEDX_CASE(16, PULLSPARSE_CASE(0););
     EMBEDX_CASE(256, PULLSPARSE_CASE(0););
+    EMBEDX_CASE(128, PULLSPARSE_CASE(0););
     default:
       PADDLE_THROW(platform::errors::InvalidArgument(
           "Unsupport this embedding size [%d]", hidden_size - 3));
@@ -368,6 +369,7 @@ void BoxWrapper::PushSparseGrad(const paddle::platform::Place& place,
                 PUSHSPARSE_CASE(64););
     EMBEDX_CASE(16, PUSHSPARSE_CASE(0););
     EMBEDX_CASE(256, PUSHSPARSE_CASE(0););
+    EMBEDX_CASE(128, PUSHSPARSE_CASE(0););
     default:
       PADDLE_THROW(platform::errors::InvalidArgument(
           "Unsupport this embedding size [%d]", hidden_size - 3));
@@ -421,14 +423,14 @@ void BoxWrapper::FeedPass(int date,
 
 void BoxWrapper::BeginFeedPass(int date, boxps::PSAgentBase** agent) {
   int ret = boxps_ptr_->BeginFeedPass(date, *agent);
-  int dim = 256;
+  int dim = 128;
   query_emb_set_q.emplace_back(dim);
   PADDLE_ENFORCE_EQ(ret, 0, platform::errors::PreconditionNotMet(
                                 "BeginFeedPass failed in BoxPS."));
 }
 
 void BoxWrapper::EndFeedPass(boxps::PSAgentBase* agent) {
-  std::cout << "END FEED:" << query_emb_set_q.back().h_emb_count << " "<< query_emb_set_q.back().h_emb.size() << std::endl; 
+  std::cout << "END FEED:" << query_emb_set_q.back().h_emb_count << " "<< query_emb_set_q.back().h_emb.size() << std::endl;
   query_emb_set_q.back().to_hbm();
   int ret = boxps_ptr_->EndFeedPass(agent);
   PADDLE_ENFORCE_EQ(ret, 0, platform::errors::PreconditionNotMet(

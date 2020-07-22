@@ -2485,7 +2485,7 @@ void SlotPaddleBoxDataFeed::LoadIntoMemoryByCommand(void) {
           if (line[0] == '#') {
             std::vector<float> query_emb;
             char* pos = const_cast<char*>(line.c_str() + 1);
-            for (int i = 0; i < 256; ++i) {
+            for (int i = 0; i < 128; ++i) {
               float feasign = strtof(pos, &pos);
               query_emb.push_back(feasign);
             }

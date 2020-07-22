@@ -61,7 +61,7 @@ class PullBoxQueryEmbOp : public framework::OperatorWithKernel {
   using framework::OperatorWithKernel::OperatorWithKernel;
   void InferShape(framework::InferShapeContext* ctx) const override {
     auto input_dim = ctx->GetInputDim("Id");
-    ctx->SetOutputDim("Out", {input_dim[0], 256});
+    ctx->SetOutputDim("Out", {input_dim[0], 128});
     ctx->ShareLoD("Id", "Out");
   }
 

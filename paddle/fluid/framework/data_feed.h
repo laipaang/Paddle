@@ -874,11 +874,15 @@ class SlotObjPool {
  public:
   SlotObjPool() : max_capacity_(FLAGS_padbox_record_pool_max_size) {
     ins_chan_ = MakeChannel<SlotRecord>();
-    thread_ = std::thread([this]() { run(); });
+    for (int i = 0; i < 8; ++i) {
+      thread_.push_back(std::thread([this]() { run(); }));
+    }
   }
   ~SlotObjPool() {
     ins_chan_->Close();
-    thread_.join();
+    for (auto &t : thread_) {
+      t.join();
+    }
   }
   void set_max_capacity(size_t max_capacity) { max_capacity_ = max_capacity; }
   void get(std::vector<SlotRecord>* output, int n) {
@@ -956,7 +960,7 @@ class SlotObjPool {
  private:
   size_t max_capacity_;
   Channel<SlotRecord> ins_chan_;
-  std::thread thread_;
+  std::vector<std::thread> thread_;
   std::mutex mutex_;
   SlotObjAllocator<SlotRecordObject> alloc_;
 };

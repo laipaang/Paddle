@@ -199,6 +199,7 @@ void BoxWrapper::CopyForPull(const paddle::platform::Place& place,
                 EXPAND_EMBED_PULL_CASE(64););
     EMBEDX_CASE(16, EXPAND_EMBED_PULL_CASE(0););
     EMBEDX_CASE(256, EXPAND_EMBED_PULL_CASE(0););
+    EMBEDX_CASE(128, EXPAND_EMBED_PULL_CASE(0););
     default:
       PADDLE_THROW(platform::errors::InvalidArgument(
           "Unsupport this embedding size [%d]", hidden_size - 3));
@@ -279,6 +280,7 @@ void BoxWrapper::CopyForPush(const paddle::platform::Place& place,
                 EXPAND_EMBED_PUSH_CASE(64););
     EMBEDX_CASE(16, EXPAND_EMBED_PUSH_CASE(0););
     EMBEDX_CASE(256, EXPAND_EMBED_PUSH_CASE(0););
+    EMBEDX_CASE(128, EXPAND_EMBED_PUSH_CASE(0););
     default:
       PADDLE_THROW(platform::errors::InvalidArgument(
           "Unsupport this embedding size [%d]", hidden_size - 3));
@@ -325,6 +327,18 @@ void QueryEmbSet::PullQueryEmb(uint64_t* d_keys, float* d_vals, int num, int gpu
   int len = emb_dim * num;
   const int BLOCK_SIZE_ = 256;
   pull_query_emb_kernel<<<(len + BLOCK_SIZE_ - 1) / BLOCK_SIZE_, BLOCK_SIZE_, 0, stream>>>(len, emb_dim, d_keys, d_vals, d_embs[gpu_id]);
+  //std::vector<float> h;
+  //h.resize(128);
+  
+  //h_emb_mtx.lock();
+  //std::cout << "val:";
+  //cudaMemcpyAsync(h.data(), d_vals + 4 * 128, sizeof(float) * 128, cudaMemcpyDeviceToHost, stream);
+  //cudaStreamSynchronize(stream);
+  //for (int i = 0; i < 128; ++i) {
+  //  std::cout << " " << h[i];
+  //}
+  //std::cout << std::endl;
+  //h_emb_mtx.unlock();
 }
 
 }  // end namespace framework
