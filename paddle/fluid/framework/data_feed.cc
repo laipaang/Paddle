@@ -2373,11 +2373,16 @@ void SlotPaddleBoxDataFeed::LoadIntoMemoryByLib(void) {
 
     SlotRecordPool().get(&record_vec, max_fetch_num);
     from_pool_num = GetTotalFeaNum(record_vec, max_fetch_num);
-    auto func = [this, &parser, &record_vec, &offset, &max_fetch_num,
+    auto box_ptr = paddle::framework::BoxWrapper::GetInstance();
+    auto& set = box_ptr->query_emb_set_q.back();
+    auto func = [this, &set, &parser, &record_vec, &offset, &max_fetch_num,
                  &from_pool_num](const std::string& line) {
       int old_offset = offset;
       if (!parser->ParseOneInstance(
-              line, [this, &offset, &record_vec, &max_fetch_num, &old_offset](
+              line,[this, &set](std::vector<float>& query_emb) -> int {
+                        return set.AddEmb(query_emb);
+                },
+                [this, &offset, &record_vec, &max_fetch_num, &old_offset](
                         std::vector<SlotRecord>& vec, int num) {
                 vec.resize(num);
                 if (offset + num > max_fetch_num) {
