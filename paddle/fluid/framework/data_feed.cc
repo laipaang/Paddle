@@ -2490,11 +2490,11 @@ void SlotPaddleBoxDataFeed::LoadIntoMemoryByCommand(void) {
           if (line[0] == '#') {
             std::vector<float> query_emb;
             char* pos = const_cast<char*>(line.c_str() + 1);
-            auto& set = box_ptr->query_emb_set_q.back();
-            for (int i = 0; i < set.emb_dim; ++i) {
+            for (int i = 0; i < 128; ++i) {
               float feasign = strtof(pos, &pos);
               query_emb.push_back(feasign);
             }
+            auto& set = box_ptr->query_emb_set_q.back();
             query_emb_offset = set.AddEmb(query_emb);
             return;
           }
