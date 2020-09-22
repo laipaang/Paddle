@@ -108,6 +108,44 @@ class PushBoxSparseOp : public framework::OperatorWithKernel {
                                    ctx.device_context());
   }
 };
+
+class LookupInputOp : public framework::OperatorWithKernel {
+ public:
+  using framework::OperatorWithKernel::OperatorWithKernel;
+  void InferShape(framework::InferShapeContext* ctx) const override {
+    auto input_dim = ctx->GetInputDim("Id");
+    auto size = static_cast<int64_t>(ctx->Attrs().Get<int>("size"));
+    ctx->SetOutputDim("Out", {input_dim[0], size});
+    ctx->ShareLoD("Id", "Out");
+  }
+
+ protected:
+  framework::OpKernelType GetExpectedKernelType(
+      const framework::ExecutionContext& ctx) const override {
+    return framework::OpKernelType(framework::proto::VarType::FP32,
+                                   ctx.device_context());
+  }
+};
+
+class LookupInputOpMaker : public framework::OpProtoAndCheckerMaker {
+ public:
+  void Make() override {
+    AddInput("Id",
+             "Input tensors with type int32 or int64 "
+             "contains the ids to be looked up in BoxPS. "
+             "The last dimension size must be 1.");
+    AddOutput("Out", "The lookup results tensors.");
+    AddAttr<int>("size", "(int, the embedding hidden size").SetDefault(1);
+    AddComment(R"DOC(
+Pull Box Sparse Operator.
+This operator is used to perform lookups on the BoxPS,
+then concatenated into a dense tensor.
+The input Ids can carry the LoD (Level of Details) information,
+or not. And the output only shares the LoD information with input Ids.
+)DOC");
+  }
+};
+
 }  // namespace operators
 }  // namespace paddle
 
@@ -119,3 +157,6 @@ REGISTER_OPERATOR(pull_box_sparse, ops::PullBoxSparseOp,
 REGISTER_OPERATOR(push_box_sparse, ops::PushBoxSparseOp);
 REGISTER_OP_CPU_KERNEL(pull_box_sparse, ops::PullBoxSparseCPUKernel<float>)
 REGISTER_OP_CPU_KERNEL(push_box_sparse, ops::PushBoxSparseCPUKernel<float>)
+
+REGISTER_OPERATOR(lookup_input, ops::LookupInputOp, ops::LookupInputOpMaker);
+REGISTER_OP_CPU_KERNEL(lookup_input, ops::LookupInputCPUKernel<float>)

@@ -695,6 +695,18 @@ def _pull_box_sparse(input, size, dtype='float32'):
         return outs[0]
     return outs
 
+def lookup_input(input, size, dtype='float32'):
+    """
+    lookup_input
+    """
+    helper = LayerHelper('lookup_input', **locals())
+    out = helper.create_variable_for_type_inference(dtype)
+    helper.append_op(
+        type='lookup_input',
+        inputs={'Id': [input]},
+        outputs={'Out': [out]},
+        attrs={'size': size})
+    return out
 
 @templatedoc()
 def linear_chain_crf(input, label, param_attr=None, length=None):

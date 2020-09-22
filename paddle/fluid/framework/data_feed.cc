@@ -1778,6 +1778,11 @@ void SlotPaddleBoxDataFeed::Init(const DataFeedDesc& data_feed_desc) {
         info.local_shape.push_back(slot.shape(j));
       }
       ++use_slot_size_;
+
+      if (info.slot == "img_idx") {
+        idx_ = info.slot_value_idx;
+        //VLOG(0) << "img idx =" << idx_;
+      }
     }
   }
   used_slots_info_.resize(use_slot_size_);
@@ -1891,6 +1896,38 @@ int SlotPaddleBoxDataFeed::GetPackPvInstance(SlotPvInstance** pv_ins) {
   *pv_ins = &pv_ins_[batch.first];
   return batch.second;
 }
+
+int SlotPaddleBoxDataFeed::GetInputKey(std::vector<uint64_t>& key) {
+  size_t num = 0;
+  if (!EnablePvMerge()) {
+    SlotRecord* ins;
+    num = GetPackInstance(&ins);
+    //VLOG(0) << "GetInputKey #="<<num;
+    key.resize(num);
+    for (size_t i = 0; i < num; ++i) {
+      uint32_t offset = ins[i]->slot_uint64_feasigns_.slot_offsets[idx_];
+      key[i] = ins[i]->slot_uint64_feasigns_.slot_values[offset];
+    }
+  } else {
+    SlotPvInstance* pv_ins;
+    num = GetPackPvInstance(&pv_ins);
+    //VLOG(0) << "GetInputKey ="<<num;
+    key.clear();
+    for (size_t i = 0; i < num; ++i) {
+      auto& pv = pv_ins[i];
+      for (auto& ins : pv->ads) {
+        uint32_t offset = ins->slot_uint64_feasigns_.slot_offsets[idx_];
+        key.push_back(ins->slot_uint64_feasigns_.slot_values[offset]);
+      }
+    }
+
+    num = key.size();
+  }
+
+  //VLOG(0) << "end GetInputKey";
+  return num;
+}
+
 void SlotPaddleBoxDataFeed::AssignFeedVar(const Scope& scope) {
   CheckInit();
   for (int i = 0; i < use_slot_size_; ++i) {
@@ -2446,8 +2483,12 @@ void SlotPaddleBoxDataFeed::LoadIntoMemoryByLib(void) {
     auto func = [this, &parser, &record_vec, &offset, &max_fetch_num,
                  &from_pool_num, &filename](const std::string& line) {
       int old_offset = offset;
+      auto box_ptr = paddle::framework::BoxWrapper::GetInstance();
+      auto GetOffsetFunc = [&box_ptr] (std::string& key) -> uint64_t {
+        return box_ptr->input_table_deque_.back().GetIdxOffset(key);
+      };
       if (!parser->ParseOneInstance(
-              line, [this, &offset, &record_vec, &max_fetch_num, &old_offset](
+              line, GetOffsetFunc, [this, &offset, &record_vec, &max_fetch_num, &old_offset](
                         std::vector<SlotRecord>& vec, int num) {
                 vec.resize(num);
                 if (offset + num > max_fetch_num) {
@@ -2964,6 +3005,7 @@ void MiniBatchGpuPack::pack_float_data(const SlotRecord* ins_vec, int num) {
 void MiniBatchGpuPack::pack_instance(const SlotRecord* ins_vec, int num) {
   pack_timer_.Resume();
   ins_num_ = num;
+  batch_ins_ = ins_vec;
   CHECK(used_uint64_num_ > 0 || used_float_num_ > 0);
   // uint64 and float
   if (used_uint64_num_ > 0 && used_float_num_ > 0) {
@@ -2996,6 +3038,95 @@ void MiniBatchGpuPack::transfer_to_gpu(void) {
   trans_timer_.Pause();
 }
 #endif
+
+bool InputTableDataFeed::ParseIdxLine(const std::string& line) {
+  auto box_ptr = paddle::framework::BoxWrapper::GetInstance();
+
+  if (line.empty()) {
+      return false;
+  }
+
+  char* str = const_cast<char*>(line.data());
+  char* endptr = nullptr;
+  int len = 0;
+
+  while (str[len] != '\0' && str[len] != '\t') {
+    ++len;
+  }
+
+  std::string key;
+  key.assign(str, len);
+  //CHECK(key.size() == 32);
+
+  str += 32;
+  std::vector<float> features;
+  float feature;
+  while (str != nullptr && *str != '\0') {
+    ++str;
+    feature  = std::strtof(str, &endptr);
+    if (str == endptr) {
+      return false;
+    }
+    str = endptr;
+    features.emplace_back(feature/255);
+  }
+
+  //CHECK(features.size() == box_ptr->input_table_deque_.back().dim());
+  // if (feature.size() != 100 * 100 * 3) {
+  //   return false;
+  // }
+  box_ptr->input_table_deque_.back().AddIdxData(key, features);
+
+  return true;
+}
+
+void InputTableDataFeed::LoadIntoMemory() {
+  boxps::PaddleDataReader* reader = nullptr;
+  if (BoxWrapper::GetInstance()->UseAfsApi() && pipe_command_.empty()) {
+    reader =
+        boxps::PaddleDataReader::New(BoxWrapper::GetInstance()->GetFileMgr());
+  }
+
+  std::string filename;
+  BufferedLineFileReader line_reader;
+  int line_id = 0;
+  while (this->PickOneFile(&filename)) {
+    VLOG(3) << "PickOneFile, filename=" << filename
+            << ", thread_id=" << thread_id_;
+
+    auto func = [this, &filename, &line_id](const std::string& line) {
+      ++line_id;
+      //VLOG(3) << "xxxxxx line: " << line_id;
+      auto r = this->ParseIdxLine(line);
+      CHECK(r != false);
+    };
+
+    int lines = 0;
+    if (BoxWrapper::GetInstance()->UseAfsApi() && pipe_command_.empty()) {
+      while (reader->open(filename) < 0) {
+        sleep(1);
+      }
+      lines = line_reader.read_api(reader, func);
+      reader->close();
+    } else {
+      if (BoxWrapper::GetInstance()->UseAfsApi()) {
+        this->fp_ = BoxWrapper::GetInstance()->OpenReadFile(
+            filename, this->pipe_command_);
+      } else {
+        int err_no = 0;
+        this->fp_ = fs_open_read(filename, &err_no, this->pipe_command_);
+      }
+      CHECK(this->fp_ != nullptr);
+      __fsetlocking(&*(this->fp_), FSETLOCKING_BYCALLER);
+      lines = line_reader.read_file(this->fp_.get(), func);
+    }
+
+    VLOG(3) << "read file:[" << filename << "], lines:[" << lines << "]";
+    continue;
+  }
+
+  //
+}
 
 #endif
 }  // namespace framework

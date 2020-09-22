@@ -20,6 +20,7 @@
 #include "paddle/fluid/framework/lod_tensor.h"
 #include "paddle/fluid/platform/collective_helper.h"
 #include "paddle/fluid/platform/gpu_info.h"
+#include "paddle/fluid/platform/cuda_device_guard.h"
 
 namespace paddle {
 namespace framework {
@@ -450,13 +451,15 @@ void BoxWrapper::FeedPass(int date,
                                 "FeedPass failed in BoxPS."));
 }
 
-void BoxWrapper::BeginFeedPass(int date, boxps::PSAgentBase** agent) const {
+void BoxWrapper::BeginFeedPass(int date, boxps::PSAgentBase** agent) {
+  input_table_deque_.emplace_back(30000);
   int ret = boxps_ptr_->BeginFeedPass(date, *agent);
   PADDLE_ENFORCE_EQ(ret, 0, platform::errors::PreconditionNotMet(
                                 "BeginFeedPass failed in BoxPS."));
 }
 
 void BoxWrapper::EndFeedPass(boxps::PSAgentBase* agent) const {
+  LOG(INFO) << "input table size: " << input_table_deque_.back().size();
   int ret = boxps_ptr_->EndFeedPass(agent);
   PADDLE_ENFORCE_EQ(ret, 0, platform::errors::PreconditionNotMet(
                                 "EndFeedPass failed in BoxPS."));
@@ -477,7 +480,9 @@ void BoxWrapper::SetTestMode(bool is_test) const {
   boxps_ptr_->SetTestMode(is_test);
 }
 
-void BoxWrapper::EndPass(bool need_save_delta) const {
+void BoxWrapper::EndPass(bool need_save_delta) {
+  input_table_deque_.pop_front();
+
   int ret = boxps_ptr_->EndPass(need_save_delta);
   PADDLE_ENFORCE_EQ(
       ret, 0, platform::errors::PreconditionNotMet("EndPass failed in BoxPS."));
@@ -625,6 +630,158 @@ void BoxWrapper::AddReplaceFeasign(boxps::PSAgentBase* p_agent,
     threads[tid].join();
   }
   VLOG(0) << "End AddReplaceFeasign";
+}
+
+InputPrefetch::InputPrefetch(int device_id) : device_id_(device_id) {
+  //platform::CUDADeviceGuard guard(device_id_);
+  //cudaStreamCreateWithFlags(&stream_, cudaStreamNonBlocking);
+
+  auto place = platform::CUDAPlace(device_id_);
+  stream_.reset(new platform::stream::CUDAStream(place));
+}
+
+InputPrefetch::~InputPrefetch() {
+  for (size_t i=0; i<thread_.size(); ++i) {
+    if (thread_[i].joinable()) {
+      thread_[i].join();
+    }
+  }
+
+  // platform::CUDADeviceGuard guard(device_id_);
+  // cudaStreamDestroy(stream_);
+}
+
+void InputPrefetch::Start() {
+  //LOG(WARNING) << "InputPrefetch::Start..." << device_id_;
+  CHECK(data_feed_ != nullptr);
+  thread_.emplace_back(std::thread([this]() {
+    for (;;) {
+      std::unique_lock<std::mutex> lck(mutex_);
+      cv_.wait(lck, [this]{return ready_num_ < 1;});
+
+      SlotPaddleBoxDataFeed* p = dynamic_cast<SlotPaddleBoxDataFeed *>(data_feed_);
+      CHECK(p != nullptr);
+      p->GetInputKey(key_);
+      if (key_.size() < 1) {
+        //LOG(WARNING) << "InputPrefetch stop..." << device_id_;
+        return;
+      }
+
+      //VLOG(0) << "Input Prefetch Start() ...." << key_.size() << " " << input_->dim();
+      platform::CPUPlace cpu_place;
+      auto cuda_place = platform::CUDAPlace(device_id_);
+      uint64_t num = key_.size() * input_->dim();
+      float* value = reinterpret_cast<float*>(mem_value_.mutable_data<float>({int64_t(num), 1}, cpu_place));
+      input_->LookupInput(key_.data(), value, key_.size());
+      //hbm_value_.clear();
+      //TensorCopy(mem_value_, cuda_place, &hbm_value_);
+      holder_.reset();
+      holder_ = memory::AllocShared(cuda_place, num * sizeof(float));
+      //VLOG(0) << "holder...size() ... " <<num << " " << holder_->size();
+      
+      platform::CUDADeviceGuard guard(device_id_);
+      //cudaMemcpy(holder_->ptr(), value, num * sizeof(float), cudaMemcpyHostToDevice);
+      // 同步异步哪个快需要进一步验证
+      cudaMemcpyAsync(holder_->ptr(), value, num * sizeof(float), cudaMemcpyHostToDevice, stream_->raw_stream());
+      //cudaMemcpyAsync(holder_->ptr(), value, num * sizeof(float), cudaMemcpyHostToDevice, stream_);
+
+      ++ready_num_;
+
+      cv_.notify_one();
+    }
+  }));
+}
+
+void InputPrefetch::fetch(Tensor& out) {
+  //VLOG(0) << "Input fetch ....";
+  std::unique_lock<std::mutex> lck(mutex_);
+  cv_.wait(lck, [this]{return ready_num_ > 0;});
+
+  //VLOG(0) << "fetch ...." << out.numel() << " " << hbm_value_.numel() << " " << hbm_value_.offset();
+  //platform::CUDADeviceGuard guard(device_id_);
+  //cudaStreamSynchronize(stream_->raw_stream());
+  //cudaStreamSynchronize(stream_);
+  stream_->Wait();
+
+  out.clear();
+  //out.ResetHolder(hbm_value_.MoveMemoryHolder());
+  out.ResetHolder(std::move(holder_));
+
+  --ready_num_;
+
+  cv_.notify_one();
+}
+
+InputTable::InputTable(uint64_t dim) : dim_(dim), miss_(0), start_(false) {
+  // add default vec 0 => 0,0,...
+  std::vector<float> vec(dim_, 0);
+  AddIdxData("-", vec);
+
+  int gpu_num = platform::GetCUDADeviceCount();
+  CHECK(gpu_num == 8);
+  for (int i = 0; i < gpu_num; ++i) {
+    fetch_.emplace_back(new InputPrefetch(i));
+  }
+  for (int i = 0; i < gpu_num; ++i) {
+    fetch_[i]->SetInput(this);
+  }
+}
+
+InputTable::~InputTable() {
+  LOG(WARNING) << "input table miss: " << miss_;
+  int gpu_num = platform::GetCUDADeviceCount();
+  //CHECK(gpu_num == 8);
+  for (int i = 0; i < gpu_num; ++i) {
+    delete fetch_[i];
+  }
+  fetch_.clear();
+}
+
+void InputTable::SetDataFeed(uint32_t i, paddle::framework::DataFeed* data_feed) {
+  //CHECK(i < fetch_.size());
+  fetch_[i]->SetDataFeed(data_feed);
+}
+
+void InputTable::PrefetchStart() {
+  if (start_) {
+    return;
+  }
+  for (size_t i=0; i<fetch_.size(); ++i) {
+    fetch_[i]->Start();
+  }
+  start_ = true;
+}
+
+void InputTable::AddIdxData(const std::string& key, std::vector<float>& vec) {
+  CHECK(vec.size() == dim_);
+
+  table_mutex_.lock();
+  key_offset_.emplace(key, table_.size());
+  table_.insert(table_.end(), vec.begin(), vec.end());
+  table_mutex_.unlock();
+}
+
+uint64_t InputTable::GetIdxOffset(std::string& key) {
+  auto it = key_offset_.find(key);
+  if (it == key_offset_.end()) {
+    ++miss_;
+    return 0;
+  }
+  return it->second;
+}
+
+void InputTable::LookupInput(Tensor& out, int divece_id) {
+  fetch_[divece_id]->fetch(out);
+}
+
+void InputTable::LookupInput(uint64_t* keys, float* values, uint64_t num) {
+  for (size_t i = 0; i < num; ++i) {
+    // if (!(keys[i] < table_.size())) {
+    //   VLOG(0) <<"xxx: "<< keys[i] << "  " << table_.size() << " " << size();
+    // }
+    //CHECK(keys[i] < table_.size());
+    memcpy(&values[i*dim_], &table_[keys[i]], dim_ * sizeof(float));
+  }
 }
 
 }  // end namespace framework

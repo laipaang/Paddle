@@ -135,6 +135,25 @@ static void PushBoxSparseFunctor(const framework::ExecutionContext &ctx) {
 #endif
 }
 
+template <typename T>
+static void LookupInputFunctor(const framework::ExecutionContext &ctx) {
+  //const auto* input = ctx.Input<framework::LoDTensor>("Id");
+  auto* output = ctx.Output<framework::LoDTensor>("Out");
+
+  //auto batch_size = input->dims()[0];
+
+  //uint64_t* input_data = reinterpret_cast<uint64_t*>(const_cast<int64_t*>(input->data<int64_t>()));
+  //float* output_data = const_cast<float*>(output->mutable_data<float>(ctx.GetPlace()));
+
+#ifdef PADDLE_WITH_BOX_PS
+  auto box_ptr = paddle::framework::BoxWrapper::GetInstance();
+  size_t device_id = BOOST_GET_CONST(platform::CUDAPlace, ctx.GetPlace()).GetDeviceId();
+  //box_ptr->input_table_deque_.front().LookupInput(input_data, output_data, batch_size, device_id);
+  box_ptr->input_table_deque_.front().LookupInput(*output, device_id);
+  
+#endif
+}
+
 using LoDTensor = framework::LoDTensor;
 template <typename T>
 class PullBoxSparseCPUKernel : public framework::OpKernel<T> {
@@ -151,5 +170,15 @@ class PushBoxSparseCPUKernel : public framework::OpKernel<T> {
     PushBoxSparseFunctor<T>(ctx);
   }
 };
+
+template <typename T>
+class LookupInputCPUKernel : public framework::OpKernel<T> {
+ public:
+  void Compute(const framework::ExecutionContext &ctx) const override {
+    LookupInputFunctor<T>(ctx);
+  }
+};
+
+
 }  // namespace operators
 }  // namespace paddle

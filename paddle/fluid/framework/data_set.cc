@@ -1457,9 +1457,50 @@ static void SetCPUAffinity(int tid, bool one_by_one = false) {
   // VLOG(0) << "binding read ins thread_id = " << tid << ", cpunum = " <<
   // core_num;
 }
+
+void PadBoxSlotDataset::LoadIntoMemoryIdx() {
+  VLOG(3) << "LoadIntoMemoryIdx()";
+
+  int thread_num = 100;
+  std::vector<std::shared_ptr<paddle::framework::DataFeed>> readers;
+  size_t file_idx = 0;
+  std::mutex mutex_for_pick_file;
+
+  for (int i = 0; i < thread_num; ++i) {
+    readers.push_back(
+        DataFeedFactory::CreateDataFeed("InputTableDataFeed"));
+    readers[i]->Init(data_feed_desc_);
+    readers[i]->SetThreadId(i);
+    readers[i]->SetFileListMutex(&mutex_for_pick_file);
+    readers[i]->SetFileListIndex(&file_idx);
+    readers[i]->SetFileList(idx_filelist_);
+  }
+
+  std::vector<std::thread> threads;
+  for (int i = 0; i < thread_num; ++i) {
+    threads.push_back(std::thread([i, &readers]() {
+      SetCPUAffinity(i, false);
+      readers[i]->LoadIntoMemory();
+    }));
+  }
+
+  for (auto& t : threads) {
+    t.join();
+  }
+  
+  VLOG(3) << "end LoadIntoMemoryIdx()";
+}
+
 // load all data into memory
 void PadBoxSlotDataset::LoadIntoMemory() {
-  VLOG(3) << "DatasetImpl<T>::LoadIntoMemory() begin";
+  VLOG(3) << "PadBoxSlotDataset<T>::LoadIntoMemory() begin";
+  
+  platform::Timer idx_timer;
+  idx_timer.Start();
+  LoadIntoMemoryIdx();
+  idx_timer.Pause();
+  VLOG(0) << "load into memory idx cost: " << idx_timer.ElapsedSec();
+
   platform::Timer timeline;
   timeline.Start();
   std::vector<std::thread> load_threads;
@@ -1786,10 +1827,20 @@ void PadBoxSlotDataset::ReceiveSuffleData(int client_id, const char* buf,
 }
 // create readers
 void PadBoxSlotDataset::CreateReaders() {
+  for (auto it = filelist_.begin(); it != filelist_.end();) {
+    if (it->substr(0, 4) == "idx:") {
+      idx_filelist_.push_back(it->substr(4));
+      it = filelist_.erase(it);
+    } else {
+      ++it;
+    }
+  }
+
   VLOG(3) << "Calling CreateReaders()"
-          << "thread num in Dataset: " << thread_num_
-          << "Filelist size in Dataset: " << filelist_.size()
-          << "readers size: " << readers_.size();
+          << " thread num in Dataset: " << thread_num_
+          << " Filelist size in Dataset: " << filelist_.size()
+          << " readers size: " << readers_.size()
+          << " idx filelist size: " << idx_filelist_.size();
   if (readers_.size() != 0) {
     VLOG(3) << "readers_.size() = " << readers_.size()
             << ", will not create again";
@@ -2003,6 +2054,15 @@ void PadBoxSlotDataset::DynamicAdjustReadersNum(int thread_num) {
   CreateReaders();
   VLOG(3) << "adjust readers num done";
   PrepareTrain();
+
+  // VLOG(0) << "set input data feed:";
+  auto box_ptr = paddle::framework::BoxWrapper::GetInstance();
+  const auto& all_readers = GetReaders();
+  CHECK(all_readers.size() == 8);
+  for (size_t i=0; i<all_readers.size(); ++i) {
+    box_ptr->input_table_deque_.front().SetDataFeed(i, all_readers[i]);
+  }
+  box_ptr->input_table_deque_.front().PrefetchStart();
 }
 
 // prepare train do something

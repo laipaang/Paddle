@@ -67,6 +67,7 @@ REGISTER_DATAFEED_CLASS(MultiSlotInMemoryDataFeed);
 REGISTER_DATAFEED_CLASS(PaddleBoxDataFeed);
 #ifdef PADDLE_WITH_BOX_PS
 REGISTER_DATAFEED_CLASS(SlotPaddleBoxDataFeed);
+REGISTER_DATAFEED_CLASS(InputTableDataFeed);
 #endif
 #if defined(PADDLE_WITH_CUDA) && !defined(_WIN32)
 REGISTER_DATAFEED_CLASS(MultiSlotFileInstantDataFeed);

@@ -193,13 +193,15 @@ class DataFeed {
   virtual void SetFeaNumMutex(std::mutex* mutex) { mutex_for_fea_num_ = mutex; }
   virtual void SetFileListIndex(size_t* file_index) { file_idx_ = file_index; }
   virtual void SetFeaNum(uint64_t* fea_num) { total_fea_num_ = fea_num; }
-  virtual const std::vector<std::string>& GetInsIdVec() const {
-    return ins_id_vec_;
+  virtual const std::string& GetLineId(int idx) const {
+    return ins_id_vec_[idx];
   }
-  virtual const std::vector<std::string>& GetInsContentVec() const {
-    return ins_content_vec_;
+  virtual const std::string& GetContent(int idx) const {
+    return ins_content_vec_[idx];
   }
-  virtual int GetCurBatchSize() { return batch_size_; }
+  virtual int GetCurBatchSize() {
+    return std::max(batch_size_, static_cast<int>(ins_id_vec_.size()));
+  }
   virtual void LoadIntoMemory() {
     PADDLE_THROW("This function(LoadIntoMemory) is not implemented.");
   }
@@ -984,7 +986,7 @@ class ISlotParser {
   virtual ~ISlotParser() {}
   virtual bool Init(const std::vector<AllSlotInfo>& slots) = 0;
   virtual bool ParseOneInstance(
-      const std::string& line,
+      const std::string& line, std::function<uint64_t(std::string&)> GetOffsetFunc,
       std::function<void(std::vector<SlotRecord>&, int)> GetInsFunc) = 0;
 };
 struct UsedSlotInfo {
@@ -1163,6 +1165,13 @@ class MiniBatchGpuPack {
     }
   }
 
+  const std::string& get_lineid(int idx) {
+    if (enable_pv_) {
+      return ins_vec_[idx]->ins_id_;
+    }
+    return batch_ins_[idx]->ins_id_;
+  }
+
  private:
   void transfer_to_gpu(void);
   void pack_all_data(const SlotRecord* ins_vec, int num);
@@ -1200,6 +1209,8 @@ class MiniBatchGpuPack {
   CudaBuffer<UsedSlotGpuType> gpu_slots_;
   std::vector<UsedSlotGpuType> gpu_used_slots_;
   std::vector<SlotRecord> ins_vec_;
+
+  const SlotRecord* batch_ins_ = nullptr;
 
   platform::Timer pack_timer_;
   platform::Timer trans_timer_;
@@ -1298,6 +1309,10 @@ class SlotPaddleBoxDataFeed : public DataFeed {
   virtual void SetCurrentPhase(int current_phase) {
     current_phase_ = current_phase;
   }
+  virtual const std::string& GetLineId(int idx) const {
+    return pack_->get_lineid(idx);
+  }
+  virtual int GetCurBatchSize() { return pack_->ins_num(); }
 
  public:
   int GetBatchSize() { return default_batch_size_; }
@@ -1314,6 +1329,8 @@ class SlotPaddleBoxDataFeed : public DataFeed {
   bool EnablePvMerge(void);
   int GetPackInstance(SlotRecord** ins);
   int GetPackPvInstance(SlotPvInstance** pv_ins);
+
+  int GetInputKey(std::vector<uint64_t> &key);
 
  public:
   virtual void Init(const DataFeedDesc& data_feed_desc);
@@ -1363,6 +1380,8 @@ class SlotPaddleBoxDataFeed : public DataFeed {
   int current_phase_{-1};  // only for untest
   std::shared_ptr<FILE> fp_ = nullptr;
   ChannelObject<SlotRecord>* input_channel_ = nullptr;
+
+  int idx_ = 0;
 
   std::vector<std::vector<float>> batch_float_feasigns_;
   std::vector<std::vector<uint64_t>> batch_uint64_feasigns_;
@@ -1508,6 +1527,24 @@ class MultiSlotFileInstantDataFeed
 
   bool ParseOneMiniBatch() override;
 };
+
+class InputTableDataFeed : public DataFeed {
+public:
+  void Init(const DataFeedDesc& data_feed_desc) override {finish_init_ = true;}
+  bool Start() override {return true;}
+  int Next() override {return 0;}
+
+  void SetThreadId(int thread_id) { thread_id_ = thread_id; }
+
+  bool ParseIdxLine(const std::string& line);
+  void LoadIntoMemory() override;
+
+
+protected:
+  int thread_id_ = 0;
+  std::shared_ptr<FILE> fp_ = nullptr;
+};
+
 #endif
 
 }  // namespace framework

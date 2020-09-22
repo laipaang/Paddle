@@ -339,6 +339,7 @@ class PadBoxSlotDataset : public DatasetImpl<SlotRecord> {
   virtual void CreateChannel();
   // load all data into memory
   virtual void LoadIntoMemory();
+  void LoadIntoMemoryIdx();
   // release all memory data
   virtual void ReleaseMemory();
   // create readers
@@ -377,6 +378,8 @@ class PadBoxSlotDataset : public DatasetImpl<SlotRecord> {
   std::atomic<int> shuffle_counter_{0};
   void* data_consumer_ = nullptr;
   std::atomic<int> receiver_cnt_{0};
+
+  std::vector<std::string> idx_filelist_;
 };
 #endif
 

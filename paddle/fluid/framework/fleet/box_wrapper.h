@@ -44,6 +44,8 @@ limitations under the License. */
 #include "paddle/fluid/platform/place.h"
 #include "paddle/fluid/platform/timer.h"
 #include "paddle/fluid/string/string_helper.h"
+#include "paddle/fluid/platform/stream/cuda_stream.h"
+
 #define BUF_SIZE 1024 * 1024
 
 DECLARE_int32(fix_dayid);
@@ -125,6 +127,83 @@ class BasicAucCalculator {
   std::mutex _table_mutex;
 };
 
+class InputTable;
+
+class InputPrefetch {
+public:
+  InputPrefetch(int device_id);
+
+  ~InputPrefetch();
+
+  void SetDataFeed(paddle::framework::DataFeed* data_feed) {
+    data_feed_ = data_feed;
+  }
+
+  void SetInput(InputTable* input) {
+    input_ = input;
+  }
+
+  void Start();
+
+  void fetch(Tensor& out);
+
+  std::vector<uint64_t> key_;
+  Tensor mem_value_;
+  Tensor hbm_value_;
+
+  paddle::framework::DataFeed* data_feed_ = nullptr;
+  std::vector<std::thread> thread_;
+
+  int device_id_ = 0;
+  int ready_num_ = 0;
+  std::mutex mutex_;
+  std::condition_variable cv_;
+
+  InputTable* input_;
+  std::shared_ptr<memory::Allocation> holder_;
+  std::unique_ptr<platform::stream::CUDAStream> stream_;
+  //cudaStream_t stream_;
+};
+
+class InputTable {
+public:
+  InputTable(uint64_t dim);
+  ~InputTable();
+  void SetDataFeed(uint32_t i, paddle::framework::DataFeed* data_feed);
+
+  void PrefetchStart();
+
+  void AddIdxData(const std::string& key, std::vector<float>& vec);
+
+  uint64_t GetIdxOffset(std::string& key);
+
+  void LookupInput(Tensor& out, int divece_id);
+  void LookupInput(uint64_t* keys, float* values, uint64_t num);
+  size_t size() const {
+    return key_offset_.size();
+  }
+
+  size_t miss() const {
+    return miss();
+  }
+
+  size_t dim() const {
+    return dim_;
+  }
+
+protected:
+  uint64_t dim_;
+  std::mutex table_mutex_;
+  std::unordered_map<std::string, uint64_t> key_offset_;
+  std::vector<float> table_;
+
+  std::atomic<size_t> miss_;
+
+  std::vector<InputPrefetch*> fetch_;
+
+  bool start_;
+};
+
 class BoxWrapper {
   struct DeviceBoxData {
     LoDTensor keys_tensor;
@@ -153,6 +232,7 @@ class BoxWrapper {
   };
 
  public:
+  std::deque<InputTable> input_table_deque_;
   virtual ~BoxWrapper() {
     if (file_manager_ != nullptr) {
       file_manager_->destory();
@@ -177,10 +257,10 @@ class BoxWrapper {
   }
 
   void FeedPass(int date, const std::vector<uint64_t>& feasgin_to_box) const;
-  void BeginFeedPass(int date, boxps::PSAgentBase** agent) const;
+  void BeginFeedPass(int date, boxps::PSAgentBase** agent);
   void EndFeedPass(boxps::PSAgentBase* agent) const;
   void BeginPass() const;
-  void EndPass(bool need_save_delta) const;
+  void EndPass(bool need_save_delta);
   void SetTestMode(bool is_test) const;
 
   template <size_t EMBEDX_DIM, size_t EXPAND_EMBED_DIM = 0>
