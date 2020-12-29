@@ -542,25 +542,96 @@ void BoxWrapper::EndPass(bool need_save_delta) {
   }
 }
 
-void BoxWrapper::PostUpdate() {
-  for (auto& cand_list : random_ins_pool_list) {
-    cand_list.ReInitPass();
+void BoxWrapper::RecordReplace(std::vector<SlotRecord>* records,
+                               const std::set<uint16_t>& slots) {
+  VLOG(0) << "Begin RecordReplace";
+
+  platform::Timer timer;
+  timer.Start();
+
+  std::vector<std::thread> threads;
+  std::valarray<int> del_num(0, auc_runner_thread_num_);
+  std::valarray<int> add_num(0, auc_runner_thread_num_);
+  for (int tid = 0; tid < auc_runner_thread_num_; ++tid) {
+    threads.push_back(std::thread([this, records, tid, &slots, &del_num,
+                                   &add_num]() {
+      size_t ins_num = records->size();
+      int start = tid * ins_num / auc_runner_thread_num_;
+      int end = (tid + 1) * ins_num / auc_runner_thread_num_;
+      VLOG(3) << "ReplaceRecord begin for thread[" << tid << "], and process ["
+              << start << ", " << end << "), total ins: " << ins_num;
+      for (int j = start; j < end; ++j) {
+        auto& record = records->at(j);
+        auto& random_pool = random_ins_pool_list[record->ext_->pool_id_];
+        FeasignValuesCandidate& candidate =
+            random_pool.GetUseReplaceId(record->ext_->replaced_id_);
+        record_replacers_[record->ext_->record_id_].replace(
+            &record->slot_uint64_feasigns_, candidate.feasign_values_, slots,
+            &del_num[tid], &add_num[tid]);
+      }
+      VLOG(3) << "thread[" << tid << "]: erase feasign num: " << del_num[tid]
+              << " repush feasign num: " << add_num[tid];
+    }));
   }
-  pass_done_semi_->Put(1);
+  for (int tid = 0; tid < auc_runner_thread_num_; ++tid) {
+    threads[tid].join();
+  }
+
+  timer.Pause();
+  VLOG(0) << "End RecordReplace: " << timer.ElapsedMS() << std::endl
+          << "del feasign num: " << del_num.sum() << std::endl
+          << "add feasign num: " << add_num.sum();
 }
 
-void BoxWrapper::GetRandomReplace(const std::vector<Record>& pass_data) {
-  VLOG(0) << "Begin GetRandomReplace";
-  size_t ins_num = pass_data.size();
-  replace_idx_.resize(ins_num);
-  /*
-  for (auto& cand_list : random_ins_pool_list) {
-    cand_list.ReInitPass();
+void BoxWrapper::RecordReplaceBack(std::vector<SlotRecord>* records,
+                                   const std::set<uint16_t>& slots) {
+  VLOG(0) << "Begin RecordReplaceBack";
+
+  platform::Timer timer;
+  timer.Start();
+
+  std::vector<std::thread> threads;
+  std::valarray<int> del_num(0, auc_runner_thread_num_);
+  std::valarray<int> add_num(0, auc_runner_thread_num_);
+  for (int tid = 0; tid < auc_runner_thread_num_; ++tid) {
+    threads.push_back(
+        std::thread([this, records, tid, &slots, &del_num, &add_num]() {
+          size_t ins_num = records->size();
+          int start = tid * ins_num / auc_runner_thread_num_;
+          int end = (tid + 1) * ins_num / auc_runner_thread_num_;
+          VLOG(3) << "RecordReplaceBack begin for thread[" << tid
+                  << "], and process [" << start << ", " << end
+                  << "), total ins: " << ins_num;
+          for (int j = start; j < end; ++j) {
+            auto& record = records->at(j);
+            record_replacers_[record->ext_->record_id_].replace_back(
+                &record->slot_uint64_feasigns_, slots, &del_num[tid],
+                &add_num[tid]);
+          }
+          VLOG(3) << "thread[" << tid
+                  << "]: erase feasign num: " << del_num[tid]
+                  << " repush feasign num: " << add_num[tid];
+        }));
   }
-  */
+  for (int tid = 0; tid < auc_runner_thread_num_; ++tid) {
+    threads[tid].join();
+  }
+  timer.Pause();
+  VLOG(0) << "End RecordReplaceBack: " << timer.ElapsedMS() << std::endl
+          << "del feasign num: " << del_num.sum() << std::endl
+          << "add feasign num: " << add_num.sum();
+}
+
+void BoxWrapper::GetRandomReplace(std::vector<SlotRecord>* records) {
+  VLOG(0) << "Begin GetRandomReplace";
+  platform::Timer timer;
+  timer.Start();
+
+  std::lock_guard<std::mutex> lock(mutex4random_pool_);
+  size_t ins_num = records->size();
   std::vector<std::thread> threads;
   for (int tid = 0; tid < auc_runner_thread_num_; ++tid) {
-    threads.push_back(std::thread([this, &pass_data, tid, ins_num]() {
+    threads.push_back(std::thread([this, records, tid, ins_num]() {
       int start = tid * ins_num / auc_runner_thread_num_;
       int end = (tid + 1) * ins_num / auc_runner_thread_num_;
       VLOG(3) << "GetRandomReplace begin for thread[" << tid
@@ -568,103 +639,30 @@ void BoxWrapper::GetRandomReplace(const std::vector<Record>& pass_data) {
               << "), total ins: " << ins_num;
       auto& random_pool = random_ins_pool_list[tid];
       for (int i = start; i < end; ++i) {
-        const auto& ins = pass_data[i];
-        random_pool.AddAndGet(ins, replace_idx_[i]);
+        auto& record = records->at(i);
+        record->ext_ = &record_ext_.back()[i];
+        record->ext_->record_id_ = i;
+        record->ext_->pool_id_ = tid;
+        record->ext_->replaced_id_ =
+            random_pool.AddAndGet(record->slot_uint64_feasigns_);
       }
     }));
   }
+
   for (int tid = 0; tid < auc_runner_thread_num_; ++tid) {
     threads[tid].join();
   }
-  // pass_done_semi_->Put(1);
-  VLOG(0) << "End GetRandomReplace";
-}
+  timer.Pause();
 
-void BoxWrapper::GetRandomData(
-    const std::vector<Record>& pass_data,
-    const std::unordered_set<uint16_t>& slots_to_replace,
-    std::vector<Record>* result) {
-  VLOG(0) << "Begin GetRandomData";
-  std::vector<std::thread> threads;
-  for (int tid = 0; tid < auc_runner_thread_num_; ++tid) {
-    threads.push_back(std::thread([this, &pass_data, tid, &slots_to_replace,
-                                   result]() {
-      int debug_erase_cnt = 0;
-      int debug_push_cnt = 0;
-      size_t ins_num = pass_data.size();
-      int start = tid * ins_num / auc_runner_thread_num_;
-      int end = (tid + 1) * ins_num / auc_runner_thread_num_;
-      VLOG(3) << "GetRandomData begin for thread[" << tid << "], and process ["
-              << start << ", " << end << "), total ins: " << ins_num;
-      const auto& random_pool = random_ins_pool_list[tid];
-      for (int j = start; j < end; ++j) {
-        const auto& ins = pass_data[j];
-        const RecordCandidate& rand_rec = random_pool.Get(replace_idx_[j]);
-
-        Record new_rec = ins;
-        /*
-        for (auto it = new_rec.uint64_feasigns_.begin();
-             it != new_rec.uint64_feasigns_.end();) {
-          if (slots_to_replace.find(it->slot()) != slots_to_replace.end()) {
-            it = new_rec.uint64_feasigns_.erase(it);
-            debug_erase_cnt += 1;
-          } else {
-            ++it;
-          }
-        }
-        for (auto slot : slots_to_replace) {
-          auto range = rand_rec.feas_.equal_range(slot);
-          for (auto it = range.first; it != range.second; ++it) {
-            new_rec.uint64_feasigns_.push_back({it->second, it->first});
-            debug_push_cnt += 1;
-          }
-        }*/
-        // make slot it sequencially
-        std::set<int> slot_id;
-        for (auto e : slots_to_replace) {
-          slot_id.insert(e);
-        }
-        size_t i = 0;
-        for (auto slot : slot_id) {
-          while (i < new_rec.uint64_feasigns_.size()) {
-            if (new_rec.uint64_feasigns_[i].slot() >= slot) {
-              break;
-            }
-            i++;
-          }
-          while (i < new_rec.uint64_feasigns_.size() &&
-                 new_rec.uint64_feasigns_[i].slot() == slot) {
-            new_rec.uint64_feasigns_.erase(new_rec.uint64_feasigns_.begin() +
-                                           i);
-            debug_erase_cnt += 1;
-          }
-          auto range = rand_rec.feas_.equal_range(slot);
-          for (auto it = range.first; it != range.second; ++it) {
-            // new_rec.uint64_feasigns_.push_back({it->second, it->first});
-            new_rec.uint64_feasigns_.insert(
-                new_rec.uint64_feasigns_.begin() + i, {it->second, it->first});
-            debug_push_cnt += 1;
-            i++;
-          }
-        }
-        (*result)[j] = std::move(new_rec);
-      }
-      VLOG(3) << "thread[" << tid << "]: erase feasign num: " << debug_erase_cnt
-              << " repush feasign num: " << debug_push_cnt;
-    }));
-  }
-  for (int tid = 0; tid < auc_runner_thread_num_; ++tid) {
-    threads[tid].join();
-  }
-  VLOG(0) << "End GetRandomData";
+  VLOG(0) << "End GetRandomReplace: " << timer.ElapsedMS();
 }
 
 void BoxWrapper::AddReplaceFeasign(boxps::PSAgentBase* p_agent,
                                    int feed_pass_thread_num) {
-  VLOG(0) << "Enter AddReplaceFeasign Function";
-  int semi;
-  pass_done_semi_->Get(semi);
-  VLOG(0) << "Last Pass had updated random pool done. Begin AddReplaceFeasign";
+  VLOG(0) << "Begin AddReplaceFeasign";
+  platform::Timer timer;
+  timer.Start();
+
   std::vector<std::thread> threads;
   for (int tid = 0; tid < feed_pass_thread_num; ++tid) {
     threads.push_back(std::thread([this, tid, p_agent, feed_pass_thread_num]() {
@@ -673,18 +671,23 @@ void BoxWrapper::AddReplaceFeasign(boxps::PSAgentBase* p_agent,
            pool_id += feed_pass_thread_num) {
         auto& random_pool = random_ins_pool_list[pool_id];
         for (size_t i = 0; i < random_pool.Size(); ++i) {
-          auto& ins_candidate = random_pool.Get(i);
-          for (const auto& pair : ins_candidate.feas_) {
-            p_agent->AddKey(pair.second.uint64_feasign_, tid);
+          auto& candidate = random_pool.GetUseId(i);
+          for (const auto& pair : candidate.feasign_values_) {
+            for (const auto feasign : pair.second) {
+              p_agent->AddKey(feasign, tid);
+            }
           }
         }
       }
     }));
   }
+
   for (int tid = 0; tid < feed_pass_thread_num; ++tid) {
     threads[tid].join();
   }
-  VLOG(0) << "End AddReplaceFeasign";
+  timer.Pause();
+
+  VLOG(0) << "End AddReplaceFeasign: " << timer.ElapsedMS();
 }
 
 }  // end namespace framework
