@@ -721,12 +721,15 @@ class BoxWrapper {
                         const std::string& pred_varname, int metric_phase,
                         const std::string& cmatch_rank_group,
                         const std::string& cmatch_rank_varname,
-                        bool ignore_rank = false, int bucket_size = 1000000) {
+                        bool ignore_rank = false,
+                        const std::string& mask_varname = "",
+                        int bucket_size = 1000000) {
       label_varname_ = label_varname;
       pred_varname_ = pred_varname;
       cmatch_rank_varname_ = cmatch_rank_varname;
       metric_phase_ = metric_phase;
       ignore_rank_ = ignore_rank;
+      mask_varname_ = mask_varname;
       calculator = new BasicAucCalculator();
       calculator->init(bucket_size);
       for (auto& cmatch_rank : string::split_string(cmatch_rank_group)) {
@@ -764,9 +767,23 @@ class BoxWrapper {
           platform::errors::PreconditionNotMet(
               "illegal batch size: cmatch_rank[%lu] and pred_data[%lu]",
               batch_size, pred_data.size()));
+
+      std::vector<int64_t> mask_data;
+      if (!mask_varname_.empty()) {
+        get_data<int64_t>(exe_scope, mask_varname_, &mask_data);
+        PADDLE_ENFORCE_EQ(
+            batch_size, mask_data.size(),
+            platform::errors::PreconditionNotMet(
+                "illegal batch size: cmatch_rank[%lu] and mask_data[%lu]",
+                batch_size, mask_data.size()));
+      }
+
       auto cal = GetCalculator();
       std::lock_guard<std::mutex> lock(cal->table_mutex());
       for (size_t i = 0; i < batch_size; ++i) {
+        if (!mask_data.empty() && !mask_data[i]) {
+          continue;
+        }
         const auto& cur_cmatch_rank = parse_cmatch_rank(cmatch_rank_data[i]);
         for (size_t j = 0; j < cmatch_rank_v.size(); ++j) {
           bool is_matched = false;
@@ -787,6 +804,7 @@ class BoxWrapper {
     std::vector<std::pair<int, int>> cmatch_rank_v;
     std::string cmatch_rank_varname_;
     bool ignore_rank_;
+    std::string mask_varname_;
   };
   class MaskMetricMsg : public MetricMsg {
    public:
@@ -880,7 +898,7 @@ class BoxWrapper {
       metric_lists_.emplace(name, new CmatchRankMetricMsg(
                                       label_varname, pred_varname, metric_phase,
                                       cmatch_rank_group, cmatch_rank_varname,
-                                      ignore_rank, bucket_size));
+                                      ignore_rank, mask_varname, bucket_size));
     } else if (method == "MaskAucCalculator") {
       metric_lists_.emplace(
           name, new MaskMetricMsg(label_varname, pred_varname, metric_phase,
