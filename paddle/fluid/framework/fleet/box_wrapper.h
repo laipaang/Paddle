@@ -1071,12 +1071,13 @@ class BoxWrapper {
 
  public:
   static std::shared_ptr<boxps::PaddleShuffler> data_shuffle_;
+  std::map<std::string, uint16_t> slot2offset_;
 
   // Auc Runner
  public:
   void InitializeAucRunner(std::vector<std::vector<std::string>> slot_eval,
                            int thread_num, int pool_size,
-                           std::vector<std::string> slot_list) {
+                           std::map<std::string, uint16_t> slot2offset) {
     PADDLE_ENFORCE_EQ(FLAGS_padbox_auc_runner_mode, true,
                       platform::errors::InvalidArgument(
                           "you should export FLAGS_padbox_auc_runner_mode=true "
@@ -1098,21 +1099,23 @@ class BoxWrapper {
         slot_set.insert(slot);
       }
     }
-    for (size_t i = 0; i < slot_list.size(); ++i) {
-      if (slot_set.find(slot_list[i]) != slot_set.end()) {
-        slot_index_to_replace_.insert(static_cast<uint16_t>(i));
-      }
+
+    slot2offset_ = slot2offset;
+    VLOG(0) << "Slots that need to be evaluated:";
+    for (auto& x : slot_set) {
+      auto it = slot2offset.find(x);
+      CHECK(it != slot2offset.end());
+      slot_index_to_replace_.insert(it->second);
+
+      VLOG(0) << it->first << ": " << it->second;
     }
+
     for (int i = 0; i < auc_runner_thread_num_; ++i) {
       random_ins_pool_list[i].SetReplacedSlots(slot_index_to_replace_);
     }
     VLOG(0) << "AucRunner configuration: thread number[" << thread_num
             << "], pool size[" << pool_size << "], runner_group[" << phase_num_
             << "]";
-    VLOG(0) << "Slots that need to be evaluated:";
-    for (auto e : slot_index_to_replace_) {
-      VLOG(0) << e << ": " << slot_list[e];
-    }
   }
   void GetRandomReplace(std::vector<SlotRecord>* records);
   void PostUpdate();
@@ -1278,9 +1281,14 @@ class BoxHelper {
 
     PadBoxSlotDataset* dataset = dynamic_cast<PadBoxSlotDataset*>(dataset_);
     CHECK(dataset);
-
     auto& records = dataset->GetInputRecord();
-    auto slot_idx = dataset->GetSlotsIdx(slots_to_replace);
+
+    std::set<uint16_t> slot_idx;
+    for (auto& x : slots_to_replace) {
+      auto it = box_ptr->slot2offset_.find(x);
+      CHECK(it != box_ptr->slot2offset_.end());
+      slot_idx.insert(it->second);
+    }
 
     if (box_ptr->record_replacers_.size() != records.size()) {
       box_ptr->record_replacers_.resize(records.size());
